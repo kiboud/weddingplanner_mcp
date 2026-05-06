@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  weddingplanner-mcp:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount the credentials from the remote host to the path expected inside the container
+      - /root/.openclaw/workspace-wedding/gcp-service-account.json:/root/.openclaw/workspace-wedding/gcp-service-account.json:ro
+    env_file:
+      - .env
+    restart: unless-stopped
