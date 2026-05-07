@@ -2,6 +2,53 @@ import { google, sheets_v4 } from 'googleapis';
 import dotenv from 'dotenv';
 dotenv.config();
 
+// --- Date normalization utility ---
+// Accepts many formats: "10 Mei 2026", "2026-05-10", "10/5/2026", "5/10/2026", "10 May 2026", etc.
+// Returns MM/DD/YYYY which Google Sheets always parses correctly as a date serial.
+const INDONESIAN_MONTHS: Record<string, number> = {
+  januari: 1, februari: 2, maret: 3, april: 4, mei: 5, juni: 6,
+  juli: 7, agustus: 8, september: 9, oktober: 10, november: 11, desember: 12
+};
+
+export function parseDate(input: string): string {
+  if (!input || input.trim() === '') return '';
+  const s = input.trim();
+
+  // Already MM/DD/YYYY or M/D/YYYY → pass through
+  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s)) return s;
+
+  // ISO: YYYY-MM-DD
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (iso) return `${parseInt(iso[2])}/${parseInt(iso[3])}/${iso[1]}`;
+
+  // "10 Mei 2026" or "10 May 2026" (Indonesian/English month name)
+  const named = s.match(/^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/);
+  if (named) {
+    const day = parseInt(named[1]);
+    const monthStr = named[2].toLowerCase();
+    const year = parseInt(named[3]);
+    // Try Indonesian first, then English via Date.parse
+    const idMonth = INDONESIAN_MONTHS[monthStr];
+    if (idMonth) return `${idMonth}/${day}/${year}`;
+    const parsed = new Date(`${named[2]} ${day} ${year}`);
+    if (!isNaN(parsed.getTime())) return `${parsed.getMonth() + 1}/${day}/${year}`;
+  }
+
+  // DD/MM/YYYY (common in Indonesia) — heuristic: if first number > 12, it must be day
+  const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (dmy) {
+    const a = parseInt(dmy[1]), b = parseInt(dmy[2]);
+    if (a > 12) return `${b}/${a}/${dmy[3]}`; // definitely DD/MM/YYYY
+    return s; // ambiguous — return as-is (Sheets will handle it)
+  }
+
+  // Fallback: try JS Date parse and reformat
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
+
+  return s; // give up, pass as-is
+}
+
 export class GoogleSheetsService {
   private sheets: sheets_v4.Sheets;
   private spreadsheetId: string;
@@ -28,7 +75,7 @@ export class GoogleSheetsService {
   }
 
   async addTodo(todo: string[]) {
-    // Append to the end of the data in To-do
+    // todo = [task, dueDate (already normalized), progress, notes]
     const response = await this.sheets.spreadsheets.values.append({
       spreadsheetId: this.spreadsheetId,
       range: 'To-do!B6:E',
@@ -176,12 +223,12 @@ export class GoogleSheetsService {
   async getDetailedBudget() {
     const response = await this.sheets.spreadsheets.values.get({
       spreadsheetId: this.spreadsheetId,
-      range: 'Detailed budget!B4:D',
+      range: 'Detailed budget!B4:E',
     });
     return response.data.values || [];
   }
 
-  async addBudgetItem(category: string, item: string, estimated: number, actual: number) {
+  async addBudgetItem(category: string, item: string, vendor: string, actual: number) {
     const detailedSheetId = await this.getSheetId('Detailed budget');
     
     const response = await this.sheets.spreadsheets.values.get({
@@ -238,20 +285,22 @@ export class GoogleSheetsService {
       });
     }
 
-    const range = `Detailed budget!B${newRowIndex + 1}:D${newRowIndex + 1}`;
+    const rowNum = newRowIndex + 1; // 1-indexed
+    const vlookupFormula = `=IFNA(VLOOKUP(C${rowNum}, Vendors!B:H, 7, FALSE), "")`;
+    const range = `Detailed budget!B${rowNum}:E${rowNum}`;
     await this.sheets.spreadsheets.values.update({
       spreadsheetId: this.spreadsheetId,
       range,
       valueInputOption: 'USER_ENTERED',
       requestBody: {
-        values: [[item, estimated, actual]],
+        values: [[item, vendor || "Vendor name", vlookupFormula, actual]],
       },
     });
 
-    return { success: true, row: newRowIndex + 1 };
+    return { success: true, row: rowNum };
   }
 
-  async updateBudgetItem(category: string, oldItemName: string, newItemName: string, estimated: number, actual: number) {
+  async updateBudgetItem(category: string, oldItemName: string, newItemName: string, vendor?: string, actual?: number) {
     const response = await this.sheets.spreadsheets.values.get({
       spreadsheetId: this.spreadsheetId,
       range: 'Detailed budget!B1:B',
@@ -280,13 +329,27 @@ export class GoogleSheetsService {
     if (itemIndex === -1) throw new Error(`Item '${oldItemName}' not found in category '${category}'`);
 
     const rowNum = itemIndex + 1;
-    const range = `Detailed budget!B${rowNum}:D${rowNum}`;
+
+    // Read current values to preserve unchanged fields
+    const currentRow = await this.sheets.spreadsheets.values.get({
+      spreadsheetId: this.spreadsheetId,
+      range: `Detailed budget!B${rowNum}:E${rowNum}`,
+    });
+    const current = currentRow.data.values?.[0] || ['', '', '', ''];
+
+    const vlookupFormula = `=IFNA(VLOOKUP(C${rowNum}, Vendors!B:H, 7, FALSE), "")`;
+    const range = `Detailed budget!B${rowNum}:E${rowNum}`;
     await this.sheets.spreadsheets.values.update({
       spreadsheetId: this.spreadsheetId,
       range,
       valueInputOption: 'USER_ENTERED',
       requestBody: {
-        values: [[newItemName, estimated, actual]],
+        values: [[
+          newItemName || current[0],
+          vendor !== undefined ? vendor : current[1],
+          vlookupFormula,
+          actual !== undefined ? actual : current[3]
+        ]],
       },
     });
     
@@ -650,14 +713,14 @@ export class GoogleSheetsService {
                 startRowIndex: headerIndex,
                 endRowIndex: blockEndIndex + 1,
                 startColumnIndex: 1, // B
-                endColumnIndex: 4 // E (so it covers B, C, D)
+                endColumnIndex: 5 // F (covers B, C, D, E)
               },
               destination: {
                 sheetId: detailedSheetId,
                 startRowIndex: newHeaderIndex,
                 endRowIndex: newHeaderIndex + blockLength,
                 startColumnIndex: 1,
-                endColumnIndex: 4
+                endColumnIndex: 5
               },
               pasteType: "PASTE_NORMAL",
               pasteOrientation: "NORMAL"
@@ -705,48 +768,146 @@ export class GoogleSheetsService {
     // 5b. Fix totals row: planned budget reference + sum formulas as RANGE
     await this.sheets.spreadsheets.values.update({
       spreadsheetId: this.spreadsheetId,
-      range: `Detailed budget!B${totalRowNum}:D${totalRowNum}`,
+      range: `Detailed budget!B${totalRowNum}:E${totalRowNum}`,
       valueInputOption: 'USER_ENTERED',
       requestBody: {
         values: [[
           `='Budget estimator'!$C$${estRowNum}`,
-          `=sum(C${firstItemRowNum}:C${boundaryRowNum})`,
-          `=sum(D${firstItemRowNum}:D${boundaryRowNum})`
+          '',
+          `=sum(D${firstItemRowNum}:D${boundaryRowNum})`,
+          `=sum(E${firstItemRowNum}:E${boundaryRowNum})`
         ]],
       },
     });
 
-    // 5c. Clear item row (leave empty for future items)
+    // 5c. Clear item row (leave formatting, set vendor placeholder)
     await this.sheets.spreadsheets.values.update({
       spreadsheetId: this.spreadsheetId,
-      range: `Detailed budget!B${firstItemRowNum}:D${firstItemRowNum}`,
+      range: `Detailed budget!B${firstItemRowNum}:E${firstItemRowNum}`,
       valueInputOption: 'USER_ENTERED',
       requestBody: {
-        values: [["", 0, 0]],
+        values: [["", "Vendor name", `=IFNA(VLOOKUP(C${firstItemRowNum}, Vendors!B:H, 7, FALSE), "")`, 0]],
       },
     });
 
     // 5d. Clear boundary row
     await this.sheets.spreadsheets.values.update({
       spreadsheetId: this.spreadsheetId,
-      range: `Detailed budget!B${boundaryRowNum}:D${boundaryRowNum}`,
+      range: `Detailed budget!B${boundaryRowNum}:E${boundaryRowNum}`,
       valueInputOption: 'USER_ENTERED',
       requestBody: {
-        values: [["", "", ""]],
+        values: [["", "", "", ""]],
       },
     });
 
-    // 6. Fix Budget estimator Actual column (Column D)
+    // 6. Fix Budget estimator Actual column (Column D references Detailed budget col E)
     await this.sheets.spreadsheets.values.update({
       spreadsheetId: this.spreadsheetId,
       range: `Budget estimator!D${estRowNum}`,
       valueInputOption: 'USER_ENTERED',
       requestBody: {
-        values: [[`='Detailed budget'!D${totalRowNum}`]],
+        values: [[`='Detailed budget'!E${totalRowNum}`]],
       },
     });
 
     return { success: true, categoryName, estRowNum, newDetailedRow: headerRowNum };
+  }
+
+  // --- Vendors Sheet Methods ---
+
+  async getVendors() {
+    const response = await this.sheets.spreadsheets.values.get({
+      spreadsheetId: this.spreadsheetId,
+      range: 'Vendors!B5:I',
+    });
+    const rows = response.data.values || [];
+    if (rows.length === 0) return [];
+
+    const headers = rows[0]; // Row 5: headers
+    return rows.slice(1) // Row 6+: data
+      .filter(row => row.some(cell => cell && cell.toString().trim() !== ''))
+      .map((row, i) => {
+        const obj: any = { rowNumber: i + 6 };
+        headers.forEach((h, j) => {
+          obj[h] = row[j] || '';
+        });
+        return obj;
+      });
+  }
+
+  async addVendor(data: Record<string, any>) {
+    const fieldMap: Record<string, number> = {
+      name: 0, contact: 1, phone: 2, email: 3, website: 4, address: 5, cost: 6, notes: 7
+    };
+
+    // Find first empty row
+    const response = await this.sheets.spreadsheets.values.get({
+      spreadsheetId: this.spreadsheetId,
+      range: 'Vendors!B6:B',
+    });
+    const values = response.data.values || [];
+    let emptyIndex = values.findIndex(row => !row[0] || row[0].toString().trim() === '');
+    const rowNumber = emptyIndex !== -1 ? emptyIndex + 6 : values.length + 6;
+
+    const row = new Array(8).fill('');
+    for (const [key, colIdx] of Object.entries(fieldMap)) {
+      if (data[key] !== undefined) row[colIdx] = data[key];
+    }
+
+    await this.sheets.spreadsheets.values.update({
+      spreadsheetId: this.spreadsheetId,
+      range: `Vendors!B${rowNumber}:I${rowNumber}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [row] },
+    });
+
+    return { success: true, rowNumber };
+  }
+
+  async updateVendor(rowNumber: number, data: Record<string, any>) {
+    const fieldMap: Record<string, number> = {
+      name: 0, contact: 1, phone: 2, email: 3, website: 4, address: 5, cost: 6, notes: 7
+    };
+
+    // Read current values
+    const response = await this.sheets.spreadsheets.values.get({
+      spreadsheetId: this.spreadsheetId,
+      range: `Vendors!B${rowNumber}:I${rowNumber}`,
+    });
+    const current = response.data.values?.[0] || new Array(8).fill('');
+
+    for (const [key, colIdx] of Object.entries(fieldMap)) {
+      if (data[key] !== undefined) current[colIdx] = data[key];
+    }
+
+    await this.sheets.spreadsheets.values.update({
+      spreadsheetId: this.spreadsheetId,
+      range: `Vendors!B${rowNumber}:I${rowNumber}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [current] },
+    });
+
+    return { success: true, rowNumber };
+  }
+
+  async deleteVendor(rowNumber: number) {
+    const sheetId = await this.getSheetId('Vendors');
+    await this.sheets.spreadsheets.batchUpdate({
+      spreadsheetId: this.spreadsheetId,
+      requestBody: {
+        requests: [{
+          deleteDimension: {
+            range: {
+              sheetId,
+              dimension: "ROWS",
+              startIndex: rowNumber - 1,
+              endIndex: rowNumber
+            }
+          }
+        }]
+      }
+    });
+    return { success: true, deletedRow: rowNumber };
   }
 
   // --- Guest List Methods ---

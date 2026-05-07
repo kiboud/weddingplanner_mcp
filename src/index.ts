@@ -2,7 +2,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import express from "express";
-import { GoogleSheetsService } from "./google-sheets.js";
+import { GoogleSheetsService, parseDate } from "./google-sheets.js";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -18,32 +18,47 @@ try {
   // Continue server start to allow debugging later, even if sheets fails to init due to missing credentials initially.
 }
 
-const server = new Server({
-  name: "wedding-planner-mcp",
-  version: "1.0.0"
-}, {
-  capabilities: {
-    tools: {}
-  }
-});
+// Track active transports per session
+const activeTransports = new Map<string, SSEServerTransport>();
 
-let transport: SSEServerTransport;
+function createServer() {
+  return new Server({
+    name: "wedding-planner-mcp",
+    version: "1.0.0"
+  }, {
+    capabilities: { tools: {} }
+  });
+}
 
 app.get("/sse", async (req, res) => {
   console.log("New SSE connection established");
-  transport = new SSEServerTransport("/message", res);
+  const transport = new SSEServerTransport("/message", res);
+  const sessionId = transport.sessionId;
+  activeTransports.set(sessionId, transport);
+
+  const server = createServer();
+  setupHandlers(server);
   await server.connect(transport);
+
+  res.on("close", () => {
+    console.log(`SSE connection closed: ${sessionId}`);
+    activeTransports.delete(sessionId);
+  });
 });
 
 app.post("/message", async (req, res) => {
+  const sessionId = req.query.sessionId as string;
+  const transport = activeTransports.get(sessionId);
   if (transport) {
     await transport.handlePostMessage(req, res);
   } else {
-    res.status(503).send("No active SSE connection");
+    res.status(503).send("No active SSE connection for session");
   }
 });
 
-server.setRequestHandler(ListToolsRequestSchema, async () => {
+function setupHandlers(server: Server) {
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
@@ -56,29 +71,29 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "add_todo",
-        description: "Add a new to-do item to the To-do sheet",
+        description: "Add a new to-do item to the To-do sheet. Date is auto-normalized to MM/DD/YYYY — you can pass any format (e.g. '10 Mei 2026', '2026-05-10', '10/5/2026'). Progress defaults to 'Not started' if not provided.",
         inputSchema: {
           type: "object",
           properties: {
-            task: { type: "string", description: "The task description (Column B)" },
-            dueDate: { type: "string", description: "Due date (Column C)" },
-            progress: { type: "string", description: "Progress status (Column D)" },
-            notes: { type: "string", description: "Additional notes (Column E)" }
+            task: { type: "string", description: "The task description" },
+            dueDate: { type: "string", description: "Due date in any format, e.g. '10 Mei 2026', '2026-05-10', '5/10/2026'" },
+            progress: { type: "string", description: "Progress status: 'Not started', 'In progress', or 'Done'. Defaults to 'Not started'." },
+            notes: { type: "string", description: "Optional notes" }
           },
           required: ["task"]
         }
       },
       {
         name: "update_todo",
-        description: "Update an existing to-do item by its row number",
+        description: "Update an existing to-do item by its row number. Date is auto-normalized to MM/DD/YYYY.",
         inputSchema: {
           type: "object",
           properties: {
             rowNumber: { type: "number", description: "The absolute row number in the spreadsheet (e.g. 6)" },
-            task: { type: "string", description: "The task description (Column B)" },
-            dueDate: { type: "string", description: "Due date (Column C)" },
-            progress: { type: "string", description: "Progress status (Column D)" },
-            notes: { type: "string", description: "Additional notes (Column E)" }
+            task: { type: "string", description: "The task description" },
+            dueDate: { type: "string", description: "Due date in any format, e.g. '10 Mei 2026', '2026-05-10'" },
+            progress: { type: "string", description: "Progress: 'Not started', 'In progress', or 'Done'" },
+            notes: { type: "string", description: "Optional notes" }
           },
           required: ["rowNumber"]
         }
@@ -221,27 +236,27 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: "object",
           properties: {
-            category: { type: "string", description: "Exact category name (e.g. 'Ceremony', 'Reception', 'Custom category 1')" },
+            category: { type: "string", description: "Exact category name (e.g. 'Ceremony', 'Reception')" },
             item: { type: "string", description: "Item name" },
-            estimated: { type: "number", description: "Estimated cost" },
+            vendor: { type: "string", description: "Vendor name (from Vendors sheet). Estimated cost auto-populated via VLOOKUP." },
             actual: { type: "number", description: "Actual cost (default 0)" }
           },
-          required: ["category", "item", "estimated"]
+          required: ["category", "item"]
         }
       },
       {
         name: "update_budget_item",
-        description: "Update an existing budget item within a specific category",
+        description: "Update an existing budget item. Estimated cost is auto-populated from Vendors sheet via VLOOKUP.",
         inputSchema: {
           type: "object",
           properties: {
             category: { type: "string", description: "Exact category name" },
             oldItemName: { type: "string", description: "Current exact name of the item to update" },
-            newItemName: { type: "string", description: "New name for the item" },
-            estimated: { type: "number", description: "New estimated cost" },
-            actual: { type: "number", description: "New actual cost" }
+            newItemName: { type: "string", description: "New name for the item (optional)" },
+            vendor: { type: "string", description: "Vendor name (from Vendors sheet)" },
+            actual: { type: "number", description: "Actual cost" }
           },
-          required: ["category", "oldItemName", "newItemName", "estimated", "actual"]
+          required: ["category", "oldItemName"]
         }
       },
       {
@@ -278,6 +293,52 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             estimate: { type: "number", description: "New estimate amount (optional)" }
           },
           required: ["oldName", "newName"]
+        }
+      },
+      // --- Vendors Tools ---
+      {
+        name: "get_vendors",
+        description: "Get all vendors from the Vendors sheet",
+        inputSchema: { type: "object", properties: {} }
+      },
+      {
+        name: "add_vendor",
+        description: "Add a new vendor to the Vendors sheet",
+        inputSchema: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Vendor name" },
+            contact: { type: "string", description: "Contact person name" },
+            phone: { type: "string" }, email: { type: "string" },
+            website: { type: "string" }, address: { type: "string" },
+            cost: { type: "number", description: "Cost/price" },
+            notes: { type: "string" }
+          },
+          required: ["name"]
+        }
+      },
+      {
+        name: "update_vendor",
+        description: "Update a vendor by row number",
+        inputSchema: {
+          type: "object",
+          properties: {
+            rowNumber: { type: "number", description: "Row number of vendor" },
+            name: { type: "string" }, contact: { type: "string" },
+            phone: { type: "string" }, email: { type: "string" },
+            website: { type: "string" }, address: { type: "string" },
+            cost: { type: "number" }, notes: { type: "string" }
+          },
+          required: ["rowNumber"]
+        }
+      },
+      {
+        name: "delete_vendor",
+        description: "Delete a vendor by row number",
+        inputSchema: {
+          type: "object",
+          properties: { rowNumber: { type: "number", description: "Row number to delete" } },
+          required: ["rowNumber"]
         }
       },
       // --- Guest List Tools ---
@@ -411,14 +472,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         content: [{ type: "text", text: JSON.stringify(todos, null, 2) }]
       };
     } else if (request.params.name === "add_todo") {
-      const { task, dueDate = "", progress = "", notes = "" } = request.params.arguments as any;
-      await sheetsService.addTodo([task, dueDate, progress, notes]);
+      const { task, dueDate = "", progress, notes = "" } = request.params.arguments as any;
+      const normalizedDate = parseDate(dueDate);
+      const normalizedProgress = progress || "Not started";
+      await sheetsService.addTodo([task, normalizedDate, normalizedProgress, notes]);
       return {
         content: [{ type: "text", text: `Successfully added to-do: ${task}` }]
       };
     } else if (request.params.name === "update_todo") {
       const { rowNumber, task = "", dueDate = "", progress = "", notes = "" } = request.params.arguments as any;
-      await sheetsService.updateTodoRow(rowNumber, [task, dueDate, progress, notes]);
+      const normalizedDate = parseDate(dueDate);
+      await sheetsService.updateTodoRow(rowNumber, [task, normalizedDate, progress, notes]);
       return {
         content: [{ type: "text", text: `Successfully updated row ${rowNumber}` }]
       };
@@ -487,12 +551,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const res = await sheetsService.addBudgetCategory(categoryName);
       return { content: [{ type: "text", text: `Successfully created new category '${categoryName}'` }] };
     } else if (request.params.name === "add_budget_item") {
-      const { category, item, estimated, actual = 0 } = request.params.arguments as any;
-      const res = await sheetsService.addBudgetItem(category, item, estimated, actual);
+      const { category, item, vendor = "", actual = 0 } = request.params.arguments as any;
+      const res = await sheetsService.addBudgetItem(category, item, vendor, actual);
       return { content: [{ type: "text", text: `Successfully added '${item}' to category '${category}' at row ${res.row}` }] };
     } else if (request.params.name === "update_budget_item") {
-      const { category, oldItemName, newItemName, estimated, actual } = request.params.arguments as any;
-      const res = await sheetsService.updateBudgetItem(category, oldItemName, newItemName, estimated, actual);
+      const { category, oldItemName, newItemName, vendor, actual } = request.params.arguments as any;
+      const res = await sheetsService.updateBudgetItem(category, oldItemName, newItemName, vendor, actual);
       return { content: [{ type: "text", text: `Successfully updated item in category '${category}' at row ${res.row}` }] };
     } else if (request.params.name === "delete_budget_item") {
       const { category, itemName } = request.params.arguments as any;
@@ -508,6 +572,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       let msg = `Successfully renamed category '${oldName}' to '${newName}'`;
       if (res.estimateUpdated) msg += ` with estimate updated`;
       return { content: [{ type: "text", text: msg }] };
+
+    // --- Vendors Handlers ---
+    } else if (request.params.name === "get_vendors") {
+      const data = await sheetsService.getVendors();
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } else if (request.params.name === "add_vendor") {
+      const args = request.params.arguments as any;
+      const res = await sheetsService.addVendor(args);
+      return { content: [{ type: "text", text: `Successfully added vendor '${args.name}' at row ${res.rowNumber}` }] };
+    } else if (request.params.name === "update_vendor") {
+      const { rowNumber, ...data } = request.params.arguments as any;
+      const res = await sheetsService.updateVendor(rowNumber, data);
+      return { content: [{ type: "text", text: `Successfully updated vendor at row ${res.rowNumber}` }] };
+    } else if (request.params.name === "delete_vendor") {
+      const { rowNumber } = request.params.arguments as any;
+      const res = await sheetsService.deleteVendor(rowNumber);
+      return { content: [{ type: "text", text: `Successfully deleted vendor at row ${res.deletedRow}` }] };
 
     // --- Guest List Handlers ---
     } else if (request.params.name === "get_guest_list") {
@@ -558,7 +639,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true
     };
   }
-});
+  });
+}
 
 app.listen(port, () => {
   console.log(`MCP SSE Server listening on port ${port}`);
