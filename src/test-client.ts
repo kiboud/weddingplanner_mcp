@@ -1,8 +1,8 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 async function main() {
-    const transport = new SSEClientTransport(new URL("http://homeminipc:8080/sse"));
+    const transport = new StreamableHTTPClientTransport(new URL("http://homeminipc:8080/mcp"));
     const client = new Client({ name: "test-client", version: "1.0.0" }, { capabilities: {} });
     await client.connect(transport);
 

@@ -1,13 +1,16 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import express from "express";
+import { randomUUID } from "node:crypto";
 import { GoogleSheetsService, parseDate } from "./google-sheets.js";
 import dotenv from "dotenv";
 
 dotenv.config();
 
 const app = express();
+app.use(express.json());
 const port = process.env.PORT || 8080;
 
 let sheetsService: GoogleSheetsService;
@@ -19,7 +22,7 @@ try {
 }
 
 // Track active transports per session
-const activeTransports = new Map<string, SSEServerTransport>();
+const activeTransports = new Map<string, StreamableHTTPServerTransport>();
 
 function createServer() {
   return new Server({
@@ -30,31 +33,55 @@ function createServer() {
   });
 }
 
-app.get("/sse", async (req, res) => {
-  console.log("New SSE connection established");
-  const transport = new SSEServerTransport("/message", res);
-  const sessionId = transport.sessionId;
-  activeTransports.set(sessionId, transport);
+app.post("/mcp", async (req, res) => {
+  const sessionId = req.headers["mcp-session-id"] as string | undefined;
+  let transport: StreamableHTTPServerTransport | undefined;
 
-  const server = createServer();
-  setupHandlers(server);
-  await server.connect(transport);
+  if (sessionId && activeTransports.has(sessionId)) {
+    transport = activeTransports.get(sessionId);
+  } else if (!sessionId && isInitializeRequest(req.body)) {
+    transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (sid) => {
+        console.log(`MCP session initialized: ${sid}`);
+        activeTransports.set(sid, transport!);
+      },
+    });
 
-  res.on("close", () => {
-    console.log(`SSE connection closed: ${sessionId}`);
-    activeTransports.delete(sessionId);
-  });
-});
+    transport.onclose = () => {
+      if (transport!.sessionId) {
+        console.log(`MCP session closed: ${transport!.sessionId}`);
+        activeTransports.delete(transport!.sessionId);
+      }
+    };
 
-app.post("/message", async (req, res) => {
-  const sessionId = req.query.sessionId as string;
-  const transport = activeTransports.get(sessionId);
-  if (transport) {
-    await transport.handlePostMessage(req, res);
+    const server = createServer();
+    setupHandlers(server);
+    await server.connect(transport);
   } else {
-    res.status(503).send("No active SSE connection for session");
+    res.status(400).json({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "Bad Request: No valid session ID provided" },
+      id: null,
+    });
+    return;
   }
+
+  await transport!.handleRequest(req, res, req.body);
 });
+
+const handleSessionRequest = async (req: express.Request, res: express.Response) => {
+  const sessionId = req.headers["mcp-session-id"] as string | undefined;
+  if (!sessionId || !activeTransports.has(sessionId)) {
+    res.status(400).send("Invalid or missing session ID");
+    return;
+  }
+  const transport = activeTransports.get(sessionId)!;
+  await transport.handleRequest(req, res);
+};
+
+app.get("/mcp", handleSessionRequest);
+app.delete("/mcp", handleSessionRequest);
 
 function setupHandlers(server: Server) {
 
@@ -643,7 +670,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 }
 
 app.listen(port, () => {
-  console.log(`MCP SSE Server listening on port ${port}`);
-  console.log(`SSE Endpoint: http://localhost:${port}/sse`);
-  console.log(`Message Endpoint: http://localhost:${port}/message`);
+  console.log(`MCP StreamableHTTP Server listening on port ${port}`);
+  console.log(`MCP Endpoint: http://localhost:${port}/mcp`);
 });
