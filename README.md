@@ -51,11 +51,23 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that c
 | `update_invitation_vendor` | Update vendor details |
 | `delete_invitation_vendor` | Delete a vendor |
 
+### 📆 Google Calendar
+| Tool | Description |
+|------|-------------|
+| `list_calendar_events` | List upcoming or filtered calendar events |
+| `get_calendar_event_information` | Get detailed information for one event |
+| `create_calendar_event` | Create a timed or all-day calendar event |
+| `create_detailed_calendar_event` | Create an event with attendees, recurrence, reminders, visibility, color, and guest permissions |
+| `update_calendar_event` | Patch an existing calendar event |
+| `add_attendees_to_calendar_event` | Add attendees without removing existing attendees |
+| `delete_calendar_event` | Delete a calendar event |
+
 ## 🛠 Prerequisites
 
 - **Node.js** ≥ 22
-- **Google Cloud Service Account** with Sheets API access
+- **Google Cloud Service Account** with Sheets API and Calendar API access
 - A Google Sheets spreadsheet based on the wedding planner template
+- A Google Calendar shared with the service account if using a non-delegated service account
 
 ## ⚡ Quick Start
 
@@ -73,11 +85,15 @@ Create a `.env` file:
 
 ```env
 SPREADSHEET_ID=your_google_spreadsheet_id_here
+CALENDAR_ID=your_google_calendar_id_here
+CALENDAR_TIME_ZONE=Asia/Jakarta
 GOOGLE_APPLICATION_CREDENTIALS=./gcp-service-account.json
 PORT=8080
 ```
 
 Place your GCP service account credentials as `gcp-service-account.json` in the project root.
+
+`CALENDAR_ID` is optional and defaults to `primary`. For service accounts, it is usually better to create or choose a Google Calendar, share it with the service account email, and set that calendar's ID here.
 
 ### 3. Build & Run
 
@@ -95,6 +111,21 @@ The server will start on `http://localhost:8080` with:
 
 ```bash
 docker compose up -d --build
+```
+
+### Build & Run without Compose
+
+```bash
+docker build -t weddingplanner-mcp .
+docker stop weddingplanner-mcp || true
+docker rm weddingplanner-mcp || true
+docker run -d \
+  --name weddingplanner-mcp \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  --env-file .env \
+  -v /path/to/gcp-service-account.json:/root/.openclaw/workspace-mimi/gcp-service-account.json:ro \
+  weddingplanner-mcp
 ```
 
 ### docker-compose.yml

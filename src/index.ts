@@ -5,6 +5,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import express from "express";
 import { randomUUID } from "node:crypto";
 import { GoogleSheetsService, parseDate } from "./google-sheets.js";
+import { GoogleCalendarService } from "./google-calendar.js";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -14,6 +15,7 @@ app.use(express.json());
 const port = process.env.PORT || 8080;
 
 let sheetsService: GoogleSheetsService;
+let calendarService: GoogleCalendarService;
 try {
   sheetsService = new GoogleSheetsService();
 } catch (e: any) {
@@ -21,8 +23,24 @@ try {
   // Continue server start to allow debugging later, even if sheets fails to init due to missing credentials initially.
 }
 
+try {
+  calendarService = new GoogleCalendarService();
+} catch (e: any) {
+  console.error("Failed to initialize GoogleCalendarService:", e.message);
+}
+
 // Track active transports per session
 const activeTransports = new Map<string, StreamableHTTPServerTransport>();
+
+const calendarToolNames = new Set([
+  "list_calendar_events",
+  "get_calendar_event_information",
+  "create_calendar_event",
+  "create_detailed_calendar_event",
+  "update_calendar_event",
+  "add_attendees_to_calendar_event",
+  "delete_calendar_event",
+]);
 
 function createServer() {
   return new Server({
@@ -482,6 +500,164 @@ function setupHandlers(server: Server) {
           properties: { rowNumber: { type: "number", description: "Row number to delete" } },
           required: ["rowNumber"]
         }
+      },
+      // --- Google Calendar Tools ---
+      {
+        name: "list_calendar_events",
+        description: "List Google Calendar events ordered by start time. Defaults to upcoming events from now.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            calendarId: { type: "string", description: "Optional Google Calendar ID. Defaults to CALENDAR_ID env or 'primary'." },
+            timeMin: { type: "string", description: "Optional RFC3339 lower bound, e.g. 2026-05-11T00:00:00+07:00" },
+            timeMax: { type: "string", description: "Optional RFC3339 upper bound, e.g. 2026-05-12T00:00:00+07:00" },
+            maxResults: { type: "number", description: "Maximum number of events to return. Defaults to 20." },
+            query: { type: "string", description: "Optional full-text search query." }
+          }
+        }
+      },
+      {
+        name: "get_calendar_event_information",
+        description: "Get detailed information for one Google Calendar event by event ID.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            calendarId: { type: "string", description: "Optional Google Calendar ID. Defaults to CALENDAR_ID env or 'primary'." },
+            eventId: { type: "string", description: "Google Calendar event ID" }
+          },
+          required: ["eventId"]
+        }
+      },
+      {
+        name: "create_calendar_event",
+        description: "Create a Google Calendar event. Use YYYY-MM-DD for all-day events or RFC3339 date-time for timed events.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            calendarId: { type: "string", description: "Optional Google Calendar ID. Defaults to CALENDAR_ID env or 'primary'." },
+            summary: { type: "string", description: "Event title" },
+            start: { type: "string", description: "Start as YYYY-MM-DD or RFC3339 date-time" },
+            end: { type: "string", description: "End as YYYY-MM-DD or RFC3339 date-time" },
+            description: { type: "string" },
+            location: { type: "string" },
+            attendees: { type: "array", items: { type: "string" }, description: "Attendee email addresses" },
+            timeZone: { type: "string", description: "IANA time zone for timed events. Defaults to CALENDAR_TIME_ZONE, TZ, or Asia/Jakarta." }
+          },
+          required: ["summary", "start", "end"]
+        }
+      },
+      {
+        name: "create_detailed_calendar_event",
+        description: "Create a Google Calendar event with optional details such as description, location, attendees, recurrence, reminders, visibility, color, and guest permissions.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            calendarId: { type: "string", description: "Optional Google Calendar ID. Defaults to CALENDAR_ID env or 'primary'." },
+            summary: { type: "string", description: "Event title" },
+            start: { type: "string", description: "Start as YYYY-MM-DD or RFC3339 date-time" },
+            end: { type: "string", description: "End as YYYY-MM-DD or RFC3339 date-time" },
+            description: { type: "string", description: "Detailed agenda, notes, or event description" },
+            location: { type: "string" },
+            attendees: { type: "array", items: { type: "string" }, description: "Attendee email addresses" },
+            timeZone: { type: "string", description: "IANA time zone for timed events. Defaults to CALENDAR_TIME_ZONE, TZ, or Asia/Jakarta." },
+            recurrence: { type: "array", items: { type: "string" }, description: "RFC5545 recurrence rules, e.g. RRULE:FREQ=WEEKLY;COUNT=4" },
+            reminders: {
+              type: "object",
+              properties: {
+                useDefault: { type: "boolean" },
+                overrides: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      method: { type: "string", enum: ["email", "popup"] },
+                      minutes: { type: "number" }
+                    },
+                    required: ["method", "minutes"]
+                  }
+                }
+              }
+            },
+            colorId: { type: "string", description: "Google Calendar color ID" },
+            visibility: { type: "string", enum: ["default", "public", "private", "confidential"] },
+            transparency: { type: "string", enum: ["opaque", "transparent"], description: "Use transparent for free/busy availability marked as free." },
+            guestsCanInviteOthers: { type: "boolean" },
+            guestsCanModify: { type: "boolean" },
+            guestsCanSeeOtherGuests: { type: "boolean" },
+            sendUpdates: { type: "string", enum: ["all", "externalOnly", "none"], description: "Whether Google should email attendees. Defaults to Google's API behavior." }
+          },
+          required: ["summary", "start", "end"]
+        }
+      },
+      {
+        name: "update_calendar_event",
+        description: "Patch an existing Google Calendar event by event ID.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            calendarId: { type: "string", description: "Optional Google Calendar ID. Defaults to CALENDAR_ID env or 'primary'." },
+            eventId: { type: "string", description: "Google Calendar event ID" },
+            summary: { type: "string", description: "Event title" },
+            start: { type: "string", description: "Start as YYYY-MM-DD or RFC3339 date-time" },
+            end: { type: "string", description: "End as YYYY-MM-DD or RFC3339 date-time" },
+            description: { type: "string" },
+            location: { type: "string" },
+            attendees: { type: "array", items: { type: "string" }, description: "Attendee email addresses" },
+            timeZone: { type: "string", description: "IANA time zone for timed events. Defaults to CALENDAR_TIME_ZONE, TZ, or Asia/Jakarta." },
+            recurrence: { type: "array", items: { type: "string" }, description: "RFC5545 recurrence rules, e.g. RRULE:FREQ=WEEKLY;COUNT=4" },
+            reminders: {
+              type: "object",
+              properties: {
+                useDefault: { type: "boolean" },
+                overrides: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      method: { type: "string", enum: ["email", "popup"] },
+                      minutes: { type: "number" }
+                    },
+                    required: ["method", "minutes"]
+                  }
+                }
+              }
+            },
+            colorId: { type: "string", description: "Google Calendar color ID" },
+            visibility: { type: "string", enum: ["default", "public", "private", "confidential"] },
+            transparency: { type: "string", enum: ["opaque", "transparent"] },
+            guestsCanInviteOthers: { type: "boolean" },
+            guestsCanModify: { type: "boolean" },
+            guestsCanSeeOtherGuests: { type: "boolean" },
+            sendUpdates: { type: "string", enum: ["all", "externalOnly", "none"], description: "Whether Google should email attendees. Defaults to Google's API behavior." }
+          },
+          required: ["eventId"]
+        }
+      },
+      {
+        name: "add_attendees_to_calendar_event",
+        description: "Add attendee email addresses to an existing Google Calendar event without removing existing attendees.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            calendarId: { type: "string", description: "Optional Google Calendar ID. Defaults to CALENDAR_ID env or 'primary'." },
+            eventId: { type: "string", description: "Google Calendar event ID" },
+            attendees: { type: "array", items: { type: "string" }, description: "Attendee email addresses to add" },
+            sendUpdates: { type: "string", enum: ["all", "externalOnly", "none"], description: "Whether Google should email attendees. Defaults to Google's API behavior." }
+          },
+          required: ["eventId", "attendees"]
+        }
+      },
+      {
+        name: "delete_calendar_event",
+        description: "Delete a Google Calendar event by event ID.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            calendarId: { type: "string", description: "Optional Google Calendar ID. Defaults to CALENDAR_ID env or 'primary'." },
+            eventId: { type: "string", description: "Google Calendar event ID" }
+          },
+          required: ["eventId"]
+        }
       }
     ]
   };
@@ -489,6 +665,42 @@ function setupHandlers(server: Server) {
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
+    if (calendarToolNames.has(request.params.name)) {
+      if (!calendarService) {
+        throw new Error("Google Calendar Service is not initialized. Please check credentials configuration.");
+      }
+
+      if (request.params.name === "list_calendar_events") {
+        const args = request.params.arguments as any;
+        const data = await calendarService.listEvents(args || {});
+        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      } else if (request.params.name === "get_calendar_event_information") {
+        const { calendarId, eventId } = request.params.arguments as any;
+        const event = await calendarService.getEvent(calendarId, eventId);
+        return { content: [{ type: "text", text: JSON.stringify(event, null, 2) }] };
+      } else if (request.params.name === "create_calendar_event") {
+        const args = request.params.arguments as any;
+        const event = await calendarService.createEvent(args);
+        return { content: [{ type: "text", text: JSON.stringify(event, null, 2) }] };
+      } else if (request.params.name === "create_detailed_calendar_event") {
+        const args = request.params.arguments as any;
+        const event = await calendarService.createEvent(args);
+        return { content: [{ type: "text", text: JSON.stringify(event, null, 2) }] };
+      } else if (request.params.name === "update_calendar_event") {
+        const { eventId, ...data } = request.params.arguments as any;
+        const event = await calendarService.updateEvent(eventId, data);
+        return { content: [{ type: "text", text: JSON.stringify(event, null, 2) }] };
+      } else if (request.params.name === "add_attendees_to_calendar_event") {
+        const { calendarId, eventId, attendees, sendUpdates } = request.params.arguments as any;
+        const event = await calendarService.addAttendees(calendarId, eventId, attendees || [], sendUpdates);
+        return { content: [{ type: "text", text: JSON.stringify(event, null, 2) }] };
+      } else if (request.params.name === "delete_calendar_event") {
+        const { calendarId, eventId } = request.params.arguments as any;
+        const res = await calendarService.deleteEvent(calendarId, eventId);
+        return { content: [{ type: "text", text: `Successfully deleted calendar event ${res.eventId}` }] };
+      }
+    }
+
     if (!sheetsService) {
       throw new Error("Google Sheets Service is not initialized. Please check credentials configuration.");
     }
