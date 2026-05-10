@@ -87,8 +87,7 @@ npm start
 ```
 
 The server will start on `http://localhost:8080` with:
-- **SSE endpoint**: `http://localhost:8080/sse`
-- **Message endpoint**: `http://localhost:8080/message`
+- **MCP endpoint**: `http://localhost:8080/mcp` (Streamable HTTP transport)
 
 ## 🐳 Docker
 
@@ -117,7 +116,7 @@ Add to your MCP config:
 {
   "mcpServers": {
     "wedding-planner": {
-      "url": "http://localhost:8080/sse"
+      "url": "http://localhost:8080/mcp"
     }
   }
 }
@@ -131,7 +130,7 @@ Add to `claude_desktop_config.json`:
 {
   "mcpServers": {
     "wedding-planner": {
-      "url": "http://localhost:8080/sse"
+      "url": "http://localhost:8080/mcp"
     }
   }
 }
