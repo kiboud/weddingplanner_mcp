@@ -60,6 +60,7 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that c
 | `create_detailed_calendar_event` | Create an event with attendees, recurrence, reminders, visibility, color, and guest permissions |
 | `update_calendar_event` | Patch an existing calendar event |
 | `add_attendees_to_calendar_event` | Add attendees without removing existing attendees |
+| `remove_attendees_from_calendar_event` | Remove attendees without changing other attendees |
 | `delete_calendar_event` | Delete a calendar event |
 
 ## 🛠 Prerequisites

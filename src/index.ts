@@ -39,6 +39,7 @@ const calendarToolNames = new Set([
   "create_detailed_calendar_event",
   "update_calendar_event",
   "add_attendees_to_calendar_event",
+  "remove_attendees_from_calendar_event",
   "delete_calendar_event",
 ]);
 
@@ -648,6 +649,20 @@ function setupHandlers(server: Server) {
         }
       },
       {
+        name: "remove_attendees_from_calendar_event",
+        description: "Remove attendee email addresses from an existing Google Calendar event without changing other attendees.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            calendarId: { type: "string", description: "Optional Google Calendar ID. Defaults to CALENDAR_ID env or 'primary'." },
+            eventId: { type: "string", description: "Google Calendar event ID" },
+            attendees: { type: "array", items: { type: "string" }, description: "Attendee email addresses to remove" },
+            sendUpdates: { type: "string", enum: ["all", "externalOnly", "none"], description: "Whether Google should email attendees. Defaults to Google's API behavior." }
+          },
+          required: ["eventId", "attendees"]
+        }
+      },
+      {
         name: "delete_calendar_event",
         description: "Delete a Google Calendar event by event ID.",
         inputSchema: {
@@ -693,6 +708,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       } else if (request.params.name === "add_attendees_to_calendar_event") {
         const { calendarId, eventId, attendees, sendUpdates } = request.params.arguments as any;
         const event = await calendarService.addAttendees(calendarId, eventId, attendees || [], sendUpdates);
+        return { content: [{ type: "text", text: JSON.stringify(event, null, 2) }] };
+      } else if (request.params.name === "remove_attendees_from_calendar_event") {
+        const { calendarId, eventId, attendees, sendUpdates } = request.params.arguments as any;
+        const event = await calendarService.removeAttendees(calendarId, eventId, attendees || [], sendUpdates);
         return { content: [{ type: "text", text: JSON.stringify(event, null, 2) }] };
       } else if (request.params.name === "delete_calendar_event") {
         const { calendarId, eventId } = request.params.arguments as any;
