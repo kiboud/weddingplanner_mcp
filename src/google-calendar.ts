@@ -138,6 +138,32 @@ export class GoogleCalendarService {
     return this.toEventResult(response.data);
   }
 
+  async removeAttendees(calendarId: string | undefined, eventId: string, attendees: string[], sendUpdates?: 'all' | 'externalOnly' | 'none') {
+    const current = await this.calendar.events.get({
+      calendarId: this.getCalendarId(calendarId),
+      eventId,
+    });
+
+    const emailsToRemove = new Set(
+      attendees
+        .filter(email => email && email.trim() !== '')
+        .map(email => email.trim().toLowerCase())
+    );
+    const remainingAttendees = (current.data.attendees || [])
+      .filter(attendee => !attendee.email || !emailsToRemove.has(attendee.email.toLowerCase()));
+
+    const response = await this.calendar.events.patch({
+      calendarId: this.getCalendarId(calendarId),
+      eventId,
+      sendUpdates,
+      requestBody: {
+        attendees: remainingAttendees,
+      },
+    });
+
+    return this.toEventResult(response.data);
+  }
+
   async deleteEvent(calendarId: string | undefined, eventId: string) {
     await this.calendar.events.delete({
       calendarId: this.getCalendarId(calendarId),
